@@ -212,9 +212,7 @@ class GoogleTrendsRequest
      */
     public function send()
     {
-        $request = $this->guzzleClient->createRequest('GET', self::TRENDS_URL, ['cookies' => $this->session->getCookieJar()]);
-        $query = $request->getQuery();
-
+        $query =[];
         $params = [
             'hl'        =>  $this->language,
             'q'         =>  implode(',+', $this->query),
@@ -229,7 +227,7 @@ class GoogleTrendsRequest
         !$this->location ?: $params['geo'] = $this->location;
 
         foreach ($params as $key => $param) {
-            $query->set($key, $param);
+            $query[$key]= $param;
         }
 
         // wait a random amount of seconds
@@ -237,7 +235,11 @@ class GoogleTrendsRequest
             sleep(rand(10, $this->session->getMaxSleepInterval())/100);
         }
 
-        $response = $this->guzzleClient->send($request);
+        $response = $this->guzzleClient->request('GET', self::TRENDS_URL, [
+            'cookies' => $this->session->getCookieJar(),
+            'query' => $query
+        ]);
+
         $content = $response->getBody()->getContents();
 
         // quota limit error
