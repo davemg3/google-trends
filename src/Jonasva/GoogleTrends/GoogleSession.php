@@ -3,6 +3,7 @@
 use GuzzleHttp\Client;
 use GuzzleHttp\Cookie\CookieJar;
 use GuzzleHttp\Cookie\SetCookie;
+use GuzzleHttp\TransferStats;
 
 class GoogleSession
 {
@@ -84,6 +85,9 @@ class GoogleSession
      * @var int
      */
     private $maxSleepInterval;
+
+    private $defaults_headers;
+    private $defaults_allow_redirects;
 
     /**
      * Get guzzle cookiejar
@@ -167,23 +171,24 @@ class GoogleSession
         $configs = array_replace(self::$defaults, $config);
 
         $this->email = $configs['email'];
+
         $this->password = $configs['password'];
         $this->recoveryEmail = $configs['recovery-email'];
         $this->userAgent = $configs['user-agent'];
         $this->language = $configs['language'];
-        $this->guzzleClient = new Client([
-            'defaults' => [
-                'headers' => [
-                    'User-Agent'    => $this->userAgent,
-                    "Content-type"  => "application/x-www-form-urlencoded",
-                    "Accept"        => "text/plain",
-                    "Referrer"      => "https://www.google.com/accounts/ServiceLoginBoxAuth",
-                ],
-                'allow_redirects' => [
-                    'max'       => 10,
-                ]
-            ]
-        ]);
+
+
+        $this->guzzleClient = new Client();
+
+        $defaults_headers= [
+            'User-Agent'    => $this->userAgent,
+            "Content-type"  => "application/x-www-form-urlencoded",
+            "Accept"        => "text/plain",
+            "Referrer"      => "https://www.google.com/accounts/ServiceLoginBoxAuth",
+        ];
+        $defaults_allow_redirects= [
+            'max'       => 5,
+        ];
         $this->cookieJar = new CookieJar();
     }
 
@@ -192,13 +197,19 @@ class GoogleSession
      */
     public function authenticate()
     {
+
         // go to google.com to get some cookies
-        $request = $this->guzzleClient->createRequest('GET', 'http://www.google.com/ncr', ['cookies' => $this->cookieJar]);
-        $response = $this->guzzleClient->send($request);
+        $response = $this->guzzleClient->request('GET', 'http://www.google.com/ncr', ['cookies' => $this->cookieJar,
+            'headers' => $this->defaults_headers,
+            'allow_redirects' => $this->defaults_allow_redirects
+            ]);
+        //$response = $this->guzzleClient->send($request);
 
         // get google auth page html and fetch GALX
-        $request = $this->guzzleClient->createRequest('GET', self::AUTH_URL, ['cookies' => $this->cookieJar]);
-        $response = $this->guzzleClient->send($request);
+        $response = $this->guzzleClient->request('GET', self::AUTH_URL, ['cookies' => $this->cookieJar,
+            'headers' => $this->defaults_headers,
+            'allow_redirects' => $this->defaults_allow_redirects]);
+        //$response = $this->guzzleClient->send($request);
 
         $content = $response->getBody()->getContents();
 
@@ -219,19 +230,22 @@ class GoogleSession
         $params['pstMsg'] = '1';
         $params['continue'] = 'http://www.google.com/trends';
 
-        // authenticate
-        $request = $this->guzzleClient->createRequest('POST', self::AUTH_URL, ['cookies' => $this->cookieJar]);
-        $query = $request->getQuery();
-
-
+        $query= [];
         foreach ($params as $key => $param) {
-            $query->set($key, $param);
+            $query[$key]= $param;
         }
+        $effectiveUrl ="";
+        // authenticate
+        $response = $this->guzzleClient->request('POST', self::AUTH_URL, ['cookies' => $this->cookieJar,
+            'headers' => $this->defaults_headers,
+            'allow_redirects' => $this->defaults_allow_redirects,
+            'query' => $query,
+            'on_stats' => function (TransferStats $stats) use (&$effectiveUrl) {
+                $effectiveUrl = $stats->getEffectiveUri();
+            }]);
 
-        $response = $this->guzzleClient->send($request);
+        if (strpos($effectiveUrl, 'LoginVerification') !== false) {
 
-        // verify sign in if needed
-        if (strpos($response->getEffectiveUrl(), 'LoginVerification') !== false) {
             $content = $response->getBody()->getContents();
 
             $document = new \DOMDocument();
@@ -248,24 +262,27 @@ class GoogleSession
             $params['challengetype'] = 'RecoveryEmailChallenge';
             $params['emailAnswer'] = $this->recoveryEmail;
 
-            $url = substr($response->getEffectiveUrl(), 0, strpos($response->getEffectiveUrl(), '?'));
+            $url = substr($effectiveUrl, 0, strpos($effectiveUrl, '?'));
 
-            $request = $this->guzzleClient->createRequest('POST', $url, ['cookies' => $this->cookieJar]);
-            $query = $request->getQuery();
-
-
+            $query = [];
             foreach ($params as $key => $param) {
-                $query->set($key, $param);
+                $query[$key]= $param;
             }
+            $response = $this->guzzleClient->request('POST', $url, ['cookies' => $this->cookieJar,
+                'headers' => $this->defaults_headers,
+                'allow_redirects' => $this->defaults_allow_redirects,
+                'query' => $query]);
 
-            $response = $this->guzzleClient->send($request);
         }
 
         // update cookies
-        $response = $this->guzzleClient->get('https://www.google.com/accounts/CheckCookie?chtml=LoginDoneHtml',
-            ['cookies' => $this->cookieJar],
-            ['headers' =>
-                ['Referrer' => 'https://www.google.com/accounts/ServiceLoginBoxAuth'],
+        $response = $this->guzzleClient->request('GET','https://www.google.com/accounts/CheckCookie?chtml=LoginDoneHtml',
+            [
+                'cookies' => $this->cookieJar,
+                //[
+                    'headers' => ['Referrer' => 'https://www.google.com/accounts/ServiceLoginBoxAuth'],
+                    'allow_redirects' => $this->defaults_allow_redirects,
+                // ]
             ]
         );
 
@@ -289,11 +306,17 @@ class GoogleSession
      */
     public function checkAuth()
     {
-        $response = $this->guzzleClient->get('https://accounts.google.com',
-            ['cookies' => $this->cookieJar]
-        );
+        $effectiveUrl ="";
+        $response = $this->guzzleClient->request('GET','https://accounts.google.com',
+            ['cookies' => $this->cookieJar,
+                'headers' => $this->defaults_headers,
+                'allow_redirects' => $this->defaults_allow_redirects,
+             'on_stats' => function (TransferStats $stats) use ($effectiveUrl) {
+                 $effectiveUrl = $stats->getEffectiveUri();
+        }]);
 
-        if (strpos($response->getEffectiveUrl(), 'ServiceLogin') !== false) {
+
+        if (strpos($effectiveUrl, 'ServiceLogin') !== false) {
             return false;
         }
 
